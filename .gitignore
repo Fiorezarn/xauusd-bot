@@ -1,0 +1,7 @@
+.env
+.venv/
+state.json
+subscribers.json
+alert_state.json
+__pycache__/
+alert.pid
