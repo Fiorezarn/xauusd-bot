@@ -5,7 +5,7 @@
 //| Uji di akun DEMO dulu. Bukan jaminan untung.                     |
 //+------------------------------------------------------------------+
 #property copyright "XAUUSD Telegram Exec"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -14,7 +14,7 @@ input group "=== Sinyal ==="
 input string InpSignalUrl        = "";          // URL feed, contoh http://IP:8787/signal
 input string InpSignalToken      = "";          // MT5_SIGNAL_TOKEN
 input int    InpPollSeconds      = 5;           // Jeda cek sinyal (detik)
-input int    InpMaxSignalAgeSec  = 180;         // Abaikan BUY yang lebih tua dari ini
+input int    InpMaxSignalAgeSec  = 180;         // Abaikan sinyal yang lebih tua dari ini
 
 input group "=== Order ==="
 input string InpSymbol           = "XAUUSD";    // Symbol Valetax
@@ -113,7 +113,7 @@ int CountOurPositions()
   }
 
 //+------------------------------------------------------------------+
-void CloseOurBuys()
+void CloseOurPositions()
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -124,12 +124,13 @@ void CloseOurBuys()
          continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
          continue;
-      if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY)
+      long kind = PositionGetInteger(POSITION_TYPE);
+      if(kind != POSITION_TYPE_BUY && kind != POSITION_TYPE_SELL)
          continue;
       if(!trade.PositionClose(ticket))
          Print("Close gagal #", ticket, " ", trade.ResultRetcodeDescription());
       else
-         Print("Close BUY #", ticket);
+         Print("Close #", ticket);
      }
   }
 
@@ -211,6 +212,39 @@ bool PlaceBuy(const double slPrice, const double tpPrice)
   }
 
 //+------------------------------------------------------------------+
+bool PlaceSell(const double slPrice, const double tpPrice)
+  {
+   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+   int digits = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
+   double sl = NormalizeDouble(slPrice, digits);
+   double tp = NormalizeDouble(tpPrice, digits);
+   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+   int stops = (int)SymbolInfoInteger(InpSymbol, SYMBOL_TRADE_STOPS_LEVEL);
+   int freeze = (int)SymbolInfoInteger(InpSymbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   double minDist = MathMax(stops, freeze) * point;
+
+   if(!(tp < bid && bid < sl))
+     {
+      Print("SL/TP tidak cocok dengan harga Valetax. bid=", bid, " sl=", sl, " tp=", tp);
+      return false;
+     }
+   if((bid - tp) < minDist || (sl - bid) < minDist)
+     {
+      Print("SL/TP lebih dekat dari batas broker. bid=", bid, " sl=", sl, " tp=", tp, " min=", minDist);
+      return false;
+     }
+
+   double lot = NormalizeLot();
+   if(!trade.Sell(lot, InpSymbol, bid, sl, tp, "tg xauusd"))
+     {
+      Print("SELL gagal: ", trade.ResultRetcodeDescription());
+      return false;
+     }
+   Print("SELL OK @", bid, " SL=", sl, " TP=", tp, " lot=", lot);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 void PollSignal()
   {
    uchar data[];
@@ -256,12 +290,12 @@ void PollSignal()
 
    if(action == "close")
      {
-      CloseOurBuys();
+      CloseOurPositions();
       SaveLastId(id);
       return;
      }
 
-   if(action != "buy")
+   if(action != "buy" && action != "sell")
       return;
 
    long age = (long)TimeGMT() - (long)ts;
@@ -269,7 +303,7 @@ void PollSignal()
      {
       if(lastLoggedSkip != id)
         {
-         Print("BUY kedaluwarsa, tidak dikejar. id=", id, " umur=", age, "s");
+         Print("Sinyal kedaluwarsa, tidak dikejar. id=", id, " umur=", age, "s");
          lastLoggedSkip = id;
         }
       return;
@@ -277,12 +311,13 @@ void PollSignal()
 
    if(CountOurPositions() > 0)
      {
-      Print("Sudah ada posisi XAUUSD, BUY baru dilewati. id=", id);
+      Print("Sudah ada posisi XAUUSD, sinyal baru dilewati. id=", id);
       SaveLastId(id);
       return;
      }
 
-   if(PlaceBuy(sl, tp))
+   bool placed = (action == "sell") ? PlaceSell(sl, tp) : PlaceBuy(sl, tp);
+   if(placed)
       SaveLastId(id);
   }
 //+------------------------------------------------------------------+

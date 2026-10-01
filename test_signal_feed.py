@@ -21,6 +21,28 @@ def test_buy_levels_match_telegram_sample():
     assert cmd["sl"] == 4180.31
 
 
+def test_sell_levels_are_inverted_from_buy():
+    cmd = build_command(
+        "sell",
+        entry=4155.68,
+        tp=4145.29,
+        sl=4166.07,
+        signal_id="sell-sample",
+        ts=2,
+    )
+    assert cmd["action"] == "sell"
+    assert cmd["symbol"] == "XAUUSD"
+    assert cmd["tp"] < cmd["entry"] < cmd["sl"]
+
+
+def test_sell_rejects_buy_shaped_stops():
+    try:
+        build_command("sell", entry=4155.68, tp=4166.07, sl=4145.29)
+    except ValueError:
+        return
+    raise AssertionError("SELL dengan TP di atas entry harus ditolak")
+
+
 def test_buy_rejects_inverted_stops():
     try:
         build_command("buy", entry=4190.78, tp=4180.31, sl=4201.26)
@@ -56,5 +78,7 @@ def test_http_requires_token_and_returns_levels():
 if __name__ == "__main__":
     test_buy_levels_match_telegram_sample()
     test_buy_rejects_inverted_stops()
+    test_sell_levels_are_inverted_from_buy()
+    test_sell_rejects_buy_shaped_stops()
     test_http_requires_token_and_returns_levels()
     print("ok")

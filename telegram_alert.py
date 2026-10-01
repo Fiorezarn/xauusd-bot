@@ -33,19 +33,21 @@ FAST = 9
 SLOW = 21
 RSI_PERIOD = 14
 RSI_OB = 65.0
+# Cermin dari RSI_OB: jangan SELL kalau RSI sudah jenuh jual.
+RSI_OS = 35.0
 # Jarak sama. TP 0,40% lebih jauh dari gerak biasa candle 15 menit,
 # jadi harga lebih sering menyentuh SL 0,25% lebih dulu.
 TP_PCT = 0.25
 SL_PCT = 0.25
 POLL_MARKET_SEC = 30
 # Ganti keduanya setiap ada perubahan aturan, supaya user dapat kabar sekali.
-UPDATE_ID = "2026-09-28-tp-sl"
+UPDATE_ID = "2026-10-01-sering"
 UPDATE_TEXT = (
     "Update sinyal XAUUSD\n\n"
-    "TP sekarang sama dengan SL, masing-masing 0,25%.\n"
-    "BUY dilewati jika candle sinyal sudah menyentuh area SL.\n"
-    "Posisi hanya ditutup saat TP atau SL kena.\n\n"
-    "Laporan tetap sama: kalau TP ya TP, kalau SL ya SL."
+    "Sinyal sekarang lebih sering, supaya MT5 tidak lama menunggu.\n"
+    "Setiap candle 15 menit yang sudah tutup bisa jadi entry selama tren EMA searah.\n"
+    "BUY kalau EMA 9 di atas EMA 21. SELL kalau EMA 9 di bawah EMA 21.\n"
+    "TP dan SL tetap 0,25%. Posisi baru menyusul setelah TP atau SL kena."
 )
 
 
@@ -70,6 +72,7 @@ def load_token() -> str:
 TOKEN = load_token()
 API = f"https://api.telegram.org/bot{TOKEN}"
 FEED: SignalFeed | None = None
+STATE_LOCK = threading.Lock()
 
 
 def api(method: str, payload: dict | None = None, timeout: int = 35) -> dict:
@@ -149,53 +152,67 @@ def fetch_signal() -> dict:
     df["rsi"] = rsi(df["Close"], RSI_PERIOD)
     # candle terakhir yang sudah tutup (hindari sinyal berubah-ubah di candle jalan)
     closed = df.iloc[-2]
-    prev = df.iloc[-3]
     fast_now = float(closed["fast"])
     slow_now = float(closed["slow"])
     rsi_now = float(closed["rsi"])
-    fast_prev = float(prev["fast"])
-    slow_prev = float(prev["slow"])
-    cross_up = fast_now > slow_now and fast_prev <= slow_prev
-    cross_dn = fast_now < slow_now and fast_prev >= slow_prev
-    # Jangan BUY kalau candle sinyal sendiri sudah turun sejauh SL.
+    # Jangan entry kalau candle sinyal sendiri sudah menyentuh area SL.
     # Entry di harga close itu sudah telat: area SL ada di dalam candle yang sama.
     close_px = float(closed["Close"])
     dipped = (close_px - float(closed["Low"])) / close_px * 100
-    sl_clear = dipped < SL_PCT
+    spiked = (float(closed["High"]) - close_px) / close_px * 100
+    buy_sl_clear = dipped < SL_PCT
+    sell_sl_clear = spiked < SL_PCT
+    bar = closed.name.isoformat() if hasattr(closed.name, "isoformat") else str(closed.name)
 
-    if cross_up and rsi_now < RSI_OB and sl_clear:
+    if fast_now > slow_now and rsi_now < RSI_OB and buy_sl_clear:
         side = "BUY"
-        reason = "EMA 9 memotong ke atas EMA 21, RSI belum jenuh, candle sinyal belum menembus area SL."
-    elif cross_up and rsi_now < RSI_OB:
-        side = "WAIT"
-        reason = "EMA menyilang naik, tapi candle sinyal sudah menyentuh jarak SL. Entry dilewati."
-    elif cross_dn:
-        side = "SELL"
-        reason = "EMA 9 memotong ke bawah EMA 21."
-    elif rsi_now >= RSI_OB and fast_now > slow_now:
-        side = "SELL"
-        reason = f"RSI {rsi_now:.1f} jenuh beli — sebaiknya ambil profit / jangan kejar."
+        reason = "EMA 9 di atas EMA 21. Candle 15 menit ini jadi BUY."
     elif fast_now > slow_now and rsi_now < RSI_OB:
-        side = "HOLD_BUY"
-        reason = "Tren masih naik (EMA 9 di atas EMA 21). Tahan posisi beli, jangan entry baru di tengah."
+        side = "WAIT"
+        reason = "Tren naik, tapi candle ini sudah menyentuh jarak SL. Entry dilewati."
+    elif fast_now > slow_now:
+        side = "WAIT"
+        reason = f"RSI {rsi_now:.1f} jenuh beli. BUY dilewati."
+    elif fast_now < slow_now and rsi_now > RSI_OS and sell_sl_clear:
+        side = "SELL"
+        reason = "EMA 9 di bawah EMA 21. Candle 15 menit ini jadi SELL."
+    elif fast_now < slow_now and rsi_now > RSI_OS:
+        side = "WAIT"
+        reason = "Tren turun, tapi candle ini sudah menyentuh jarak SL. Entry dilewati."
+    elif fast_now < slow_now:
+        side = "WAIT"
+        reason = f"RSI {rsi_now:.1f} jenuh jual. SELL dilewati."
     else:
         side = "WAIT"
-        reason = "Belum ada sinyal beli. Tunggu EMA 9 memotong ke atas EMA 21."
+        reason = "EMA 9 dan EMA 21 masih rapat. Tunggu candle berikut."
 
     spot = fetch_spot()
+    tp, sl = order_levels(spot, side)
     return {
         "side": side,
+        "bar": bar,
         "price": round(spot, 2),
         "live": round(spot, 2),
         "futures": round(float(df.iloc[-1]["Close"]), 2),
         "reason": reason,
-        "sl": round(spot * (1 - SL_PCT / 100), 2),
-        "tp": round(spot * (1 + TP_PCT / 100), 2),
+        "sl": sl,
+        "tp": tp,
     }
 
 
+def order_levels(price: float, side: str) -> tuple[float, float]:
+    """TP di atas entry untuk BUY, di bawah entry untuk SELL. Jarak tetap TP_PCT dan SL_PCT."""
+    if side == "SELL":
+        tp = round(price * (1 - TP_PCT / 100), 2)
+        sl = round(price * (1 + SL_PCT / 100), 2)
+        return tp, sl
+    sl = round(price * (1 - SL_PCT / 100), 2)
+    tp = round(price * (1 + TP_PCT / 100), 2)
+    return tp, sl
+
+
 def format_entry(sig: dict) -> str:
-    return f"XAUUSD BUY\nEntry: {sig['price']:.2f}\nTP: {sig['tp']:.2f}\nSL: {sig['sl']:.2f}"
+    return f"XAUUSD {sig['side']}\nEntry: {sig['price']:.2f}\nTP: {sig['tp']:.2f}\nSL: {sig['sl']:.2f}"
 
 
 def format_hit(label: str, level: float) -> str:
@@ -205,8 +222,9 @@ def format_hit(label: str, level: float) -> str:
 def format_status(sig: dict, state: dict) -> str:
     pos = state.get("position")
     if pos:
+        label = pos.get("side") or "BUY"
         return (
-            f"XAUUSD BUY\n"
+            f"XAUUSD {label}\n"
             f"Entry: {pos['entry']:.2f}\n"
             f"TP: {pos['tp']:.2f}\n"
             f"SL: {pos['sl']:.2f}\n"
@@ -257,7 +275,24 @@ def handle_message(msg: dict, sig_cache: dict) -> None:
     text = (msg.get("text") or "").strip()
     cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
 
-    if cmd in ("/start", "/signal", "/status", ""):
+    if cmd == "/signal":
+        add_subscriber(int(chat_id))
+        try:
+            sig = open_manual_buy()
+            sig_cache.clear()
+            sig_cache.update(sig)
+        except Exception as exc:
+            send(chat_id, f"Sinyal uji gagal: {exc}")
+            return
+        send(
+            chat_id,
+            format_entry(sig)
+            + "\n\nSinyal ini baru saja dikirim ke MT5."
+            + "\nEA membeli XAUUSD dalam beberapa detik kalau Algo Trading aktif dan belum ada posisi terbuka dari EA ini.",
+        )
+        return
+
+    if cmd in ("/start", "/status", ""):
         add_subscriber(int(chat_id))
         try:
             sig = fetch_signal()
@@ -267,14 +302,88 @@ def handle_message(msg: dict, sig_cache: dict) -> None:
             send(chat_id, f"Belum bisa ambil harga emas: {exc}")
             return
         state = load_json(STATE_FILE, {})
-        send(chat_id, "Tidak perlu ketik apa-apa.\nEntry, TP, dan SL saya kirim sendiri.\n\n" + format_status(sig, state))
+        send(chat_id, "Tidak perlu ketik apa-apa.\nEntry, TP, dan SL saya kirim sendiri.\nKetik /signal kalau ingin BUY uji ke MT5 sekarang.\n\n" + format_status(sig, state))
         return
 
     send(chat_id, "Tidak perlu ketik apa-apa. Saya kirim sendiri kalau ada entry, TP, atau SL.")
 
 
+def position_hit(pos: dict, price: float) -> str:
+    """TP/SL tergantung arah. SELL untung kalau harga turun."""
+    if (pos.get("side") or "BUY") == "SELL":
+        if price <= pos["tp"]:
+            return "TP"
+        if price >= pos["sl"]:
+            return "SL"
+        return ""
+    if price >= pos["tp"]:
+        return "TP"
+    if price <= pos["sl"]:
+        return "SL"
+    return ""
+
+
+def open_manual_buy() -> dict:
+    """BUY segar untuk uji MT5. Timestamp baru supaya EA tidak menganggap sinyal kedaluwarsa."""
+    if FEED is None:
+        raise RuntimeError("feed MT5 belum jalan")
+    price = round(fetch_spot(), 2)
+    tp, sl = order_levels(price, "BUY")
+    stamp = int(time.time())
+    pos = {
+        "side": "BUY",
+        "entry": price,
+        "tp": tp,
+        "sl": sl,
+        "id": f"buy-test-{stamp}",
+        "ts": stamp,
+    }
+    sig = {
+        "side": "BUY",
+        "price": price,
+        "live": price,
+        "tp": tp,
+        "sl": sl,
+        "reason": "BUY uji dari /signal",
+    }
+    with STATE_LOCK:
+        prev = load_json(STATE_FILE, {})
+        save_json(
+            STATE_FILE,
+            {
+                "side": "BUY",
+                "price": price,
+                "position": pos,
+                "entry_bar": prev.get("entry_bar"),
+                "at": datetime.now(timezone.utc).isoformat(),
+                "notified_update": prev.get("notified_update"),
+            },
+        )
+        publish_open(pos)
+    print(f"[alert] BUY uji {price} tp {tp} sl {sl}", flush=True)
+    return sig
+
+
+def publish_open(pos: dict) -> None:
+    if FEED is None:
+        return
+    publish = FEED.publish_sell if pos.get("side") == "SELL" else FEED.publish_buy
+    publish(
+        pos["entry"],
+        pos["tp"],
+        pos["sl"],
+        signal_id=str(pos.get("id") or ""),
+        ts=int(pos.get("ts") or time.time()),
+    )
+
+
 def check_market(last_side: str | None) -> str | None:
     sig = fetch_signal()
+    with STATE_LOCK:
+        return _check_market_locked(sig, last_side)
+
+
+def _check_market_locked(sig: dict, last_side: str | None) -> str | None:
     state = load_json(STATE_FILE, {})
     pos = state.get("position")
     side = sig["side"]
@@ -282,38 +391,36 @@ def check_market(last_side: str | None) -> str | None:
 
     opened = False
     closed_label = ""
+    entry_bar = state.get("entry_bar")
+    bar = sig.get("bar")
     if pos:
-        if price >= pos["tp"]:
+        closed_label = position_hit(pos, price)
+        if closed_label == "TP":
             broadcast(format_hit("TP", pos["tp"]))
             print(f"[alert] TP {pos['tp']}", flush=True)
-            closed_label = "TP"
             pos = None
-        elif price <= pos["sl"]:
+        elif closed_label == "SL":
             broadcast(format_hit("SL", pos["sl"]))
             print(f"[alert] SL {pos['sl']}", flush=True)
-            closed_label = "SL"
             pos = None
-    elif side == "BUY" and last_side != "BUY":
+        else:
+            closed_label = ""
+    elif side in ("BUY", "SELL") and entry_bar != bar:
         stamp = int(time.time())
         pos = {
+            "side": side,
             "entry": sig["price"],
             "tp": sig["tp"],
             "sl": sig["sl"],
-            "id": f"buy-{stamp}",
+            "id": f"{side.lower()}-{stamp}",
             "ts": stamp,
         }
         broadcast(format_entry(sig))
-        print(f"[alert] BUY {sig['price']} tp {sig['tp']} sl {sig['sl']}", flush=True)
+        print(f"[alert] {side} {sig['price']} tp {sig['tp']} sl {sig['sl']}", flush=True)
         opened = True
 
-    if FEED is not None and opened and pos:
-        FEED.publish_buy(
-            pos["entry"],
-            pos["tp"],
-            pos["sl"],
-            signal_id=pos["id"],
-            ts=pos["ts"],
-        )
+    if opened and pos:
+        publish_open(pos)
     elif FEED is not None and closed_label:
         FEED.publish_close(closed_label)
 
@@ -324,6 +431,7 @@ def check_market(last_side: str | None) -> str | None:
             "side": side,
             "price": sig["price"],
             "position": pos,
+            "entry_bar": bar if opened else entry_bar,
             "at": datetime.now(timezone.utc).isoformat(),
             "notified_update": prev.get("notified_update"),
         },
@@ -339,7 +447,7 @@ def main() -> None:
         {
             "commands": json.dumps(
                 [
-                    {"command": "signal", "description": "Entry, TP, SL"},
+                    {"command": "signal", "description": "BUY uji ke MT5 sekarang"},
                     {"command": "status", "description": "Entry, TP, SL"},
                     {"command": "help", "description": "Bantuan"},
                 ]
@@ -368,14 +476,11 @@ def main() -> None:
         except (TypeError, ValueError):
             pass
         ts = int(pos.get("ts") or ts)
+        pos = dict(pos)
+        pos.setdefault("id", f"buy-{opened_at or ts}")
+        pos["ts"] = ts
         try:
-            FEED.publish_buy(
-                pos["entry"],
-                pos["tp"],
-                pos["sl"],
-                signal_id=str(pos.get("id") or f"buy-{opened_at or ts}"),
-                ts=ts,
-            )
+            publish_open(pos)
         except ValueError as exc:
             print(f"[mt5] posisi tersimpan tidak dikirim: {exc}", flush=True)
             FEED.publish_none()

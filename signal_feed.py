@@ -7,6 +7,13 @@ Isi sinyal sama dengan pesan Telegram:
     TP: ...
     SL: ...
 
+    XAUUSD SELL
+    Entry: ...
+    TP: ...
+    SL: ...
+
+Untuk SELL, TP ada di bawah entry dan SL di atas entry.
+
 Lot tidak dikirim ke broker dari sini. Lot tetap diatur di Expert Advisor.
 """
 
@@ -27,11 +34,16 @@ def build_command(
     signal_id: str = "",
     ts: int | None = None,
 ) -> dict:
-    if action not in ("none", "buy", "close"):
+    if action not in ("none", "buy", "sell", "close"):
         raise ValueError(f"action tidak dikenal: {action}")
     if action == "buy":
         if not (sl < entry < tp):
             raise ValueError(f"BUY butuh SL < Entry < TP, dapat sl={sl} entry={entry} tp={tp}")
+        if entry < 1000:
+            raise ValueError(f"harga XAUUSD tidak masuk akal: {entry}")
+    if action == "sell":
+        if not (tp < entry < sl):
+            raise ValueError(f"SELL butuh TP < Entry < SL, dapat tp={tp} entry={entry} sl={sl}")
         if entry < 1000:
             raise ValueError(f"harga XAUUSD tidak masuk akal: {entry}")
     now = int(time.time()) if ts is None else int(ts)
@@ -78,6 +90,26 @@ class SignalFeed:
                 tp=tp,
                 sl=sl,
                 signal_id=signal_id or f"buy-{stamp}",
+                ts=stamp,
+            )
+        )
+
+    def publish_sell(
+        self,
+        entry: float,
+        tp: float,
+        sl: float,
+        signal_id: str | None = None,
+        ts: int | None = None,
+    ) -> None:
+        stamp = int(time.time()) if ts is None else int(ts)
+        self._set(
+            build_command(
+                "sell",
+                entry=entry,
+                tp=tp,
+                sl=sl,
+                signal_id=signal_id or f"sell-{stamp}",
                 ts=stamp,
             )
         )

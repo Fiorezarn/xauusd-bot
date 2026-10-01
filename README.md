@@ -14,7 +14,7 @@ Broker: **Valetax** · Platform: **MetaTrader 5** · Pair: **XAUUSD**
 
 ## Eksekusi sinyal Telegram
 
-Bot Telegram tetap yang menentukan Entry, TP, dan SL. MT5 hanya membeli XAUUSD dengan angka itu, lot tetap **0.01**.
+Bot Telegram tetap yang menentukan Entry, TP, dan SL, untuk BUY maupun SELL. MT5 mengeksekusi XAUUSD dengan angka itu, lot tetap **0.01**.
 
 Pasang `mt5/XAUUSD_TelegramExec.mq5` di chart XAUUSD. Jangan pasang bersamaan dengan `XAUUSD_Valetax_Bot.mq5` (EA itu punya sinyal sendiri).
 
@@ -46,7 +46,7 @@ Di MT5 → **File → Login to Trade Account**:
 7. Tools → Options → Expert Advisors → centang **Allow WebRequest**, lalu tambahkan URL yang sama persis dengan `InpSignalUrl`
 8. Tekan **Algo Trading** di toolbar sampai hijau
 
-BUY hanya diambil jika sinyal masih baru (paling lama 3 menit) dan EA sedang jalan. TP dan SL di order sama dengan pesan bot. Saat bot mengirim TP atau SL, EA menutup posisi yang masih terbuka.
+BUY dan SELL hanya diambil jika sinyal masih baru (paling lama 3 menit) dan EA sedang jalan. TP dan SL di order sama dengan pesan bot. Untuk SELL, TP ada di bawah entry dan SL di atas entry. Saat bot mengirim TP atau SL, EA menutup posisi yang masih terbuka.
 
 ### 4. Parameter EA
 
